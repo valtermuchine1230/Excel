@@ -42,7 +42,8 @@ def add_title_band(ws, title, row=1, colspan=10):
     ws.merge_cells(merged_range)
     cell = ws[f"A{row}"]
     cell.value = title
-    cell.row_dimensions[row].height = 28
+    # Correct: row_dimensions belongs to Worksheet, not Cell
+    ws.row_dimensions[row].height = 28
     apply_style(cell, StylePresets.title_band())
 
 def create_named_range(wb, name, sheet_name, cell):
@@ -1081,8 +1082,8 @@ ANALYSIS & METRICS:
 
 PLANNING & CONTROL:
   • 10_Economic_Calendar ....... Key news events to monitor
-  • 11_Financial_Control ....... Deposit/withdrawal tracking
-  • 12_Lot_Size_Calculator ..... Position sizing by asset class
+  • 11_Financial_CONTROL ....... Deposit/withdrawal tracking
+  • 12_Lot_SIZE_CALCULATOR ..... Position sizing by asset class
   • 13_Tax_Calculator .......... Brazil day-trade tax + generic rules
   • 14_Compounding_Calculator .. Growth projections
   • 15_Expectancy_Calculator ... Edge validator for your setups
@@ -1119,7 +1120,7 @@ RULE COMPLIANCE:
 
 EXPECTANCY:
   Your average profit per trade in R. 
-  Positive expectancy = you have an edge. Use "Expectancy Calculator" to validate new setups.
+  Positive expectancy = you have an edge. Use "Expectancy Calculator" to validate new setups with 30+ historical trades before live trading.
 
 ⚙️ CELL PROTECTION & EDITING
 =============================
