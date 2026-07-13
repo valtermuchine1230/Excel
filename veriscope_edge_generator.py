@@ -17,6 +17,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment, Protection, numbers
 from openpyxl.formatting.rule import ColorScaleRule, CellIsRule, FormulaRule
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.workbook.defined_name import DefinedName
 
 from styles import COLORS, StylePresets, apply_style
 
@@ -48,7 +49,11 @@ def add_title_band(ws, title, row=1, colspan=10):
 
 def create_named_range(wb, name, sheet_name, cell):
     """Create a named range in the workbook."""
-    wb.defined_names[name] = f"'{sheet_name}'!${cell}"
+    defined_name = DefinedName(
+        name=name,
+        attr_text=f"'{sheet_name}'!${cell}"
+    )
+    wb.defined_names.add(defined_name)
 
 def apply_sheet_protection(ws, password='veriscope2026'):
     """Apply sheet protection with password."""
