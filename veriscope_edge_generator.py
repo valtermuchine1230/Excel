@@ -154,7 +154,7 @@ def build_cover_sheet(wb, tier, sheet_links):
     s.alignment = Alignment(horizontal='center')
     ws.merge_cells('A9:K11')
     d = ws['A9']
-    d.value = 'Know Your Edge. Trade With Proof.\nVersion 1.0 — ' + datetime.now().strftime('%Y-%m-%d')
+    d.value = 'Know Your Edge. Trade With Proof.\nVersion 1.0'
     d.font = Font(size=10, color=COLORS['text_light'])
     d.alignment = Alignment(horizontal='center', wrap_text=True)
 
