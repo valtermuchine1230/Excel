@@ -52,7 +52,7 @@ def create_named_range(wb, name, sheet_name, cell):
     """Create a named range in the workbook."""
     # Use DefinedName and append to workbook defined names
     dn = DefinedName(name=name, attr_text=f"'{sheet_name}'!${cell}")
-    wb.defined_names.append(dn)
+    wb.defined_names.add(dn)
 
 def apply_sheet_protection(ws, password='veriscope2026'):
     """Apply sheet protection with password."""
