@@ -13,9 +13,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.20'
+          go-version: 'stable'
+
+      - name: Verify Go version
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          go version
+        shell: bash
 
       - name: Install system packages (wireguard-tools, jq, curl, python3, pip)
         run: |
