@@ -11,6 +11,7 @@ import random
 import subprocess
 import logging
 import traceback
+import re
 
 import pexpect
 import requests
@@ -53,49 +54,82 @@ def run_cmd(cmd, timeout=30, check=True):
         logging.debug("Return code: %s", completed.returncode)
         logging.debug("Output:\n%s", completed.stdout)
         if check and completed.returncode != 0:
-            raise VPNError(f"Command {cmd} failed with code {completed.returncode}")
+            raise VPNError(f"Command {cmd} failed with code {completed.returncode}\nOutput:\n{completed.stdout}")
         return completed.stdout
     except subprocess.TimeoutExpired as e:
         logging.error("Command timed out: %s", cmd)
         raise
 
 def list_free_servers():
+    """
+    Correção do parsing:
+    - Divide cada linha pela barra vertical '|' e usa apenas o 2º campo (hostname).
+    - Remove espaços em branco com strip().
+    - Ignora linhas vazias, cabeçalhos (ex: contendo 'Location' ou 'Hostname'),
+      separadores (linhas só com traços) e linhas com menos de 2 campos.
+    - Retorna apenas uma lista de hostnames limpos.
+    """
     if not os.path.exists(HIDE_BINARY):
         raise VPNError(f"{HIDE_BINARY} not found. Ensure binary was built and is in the working directory.")
     try:
         out = run_cmd([HIDE_BINARY, "list", "free"])
-        # Basic parsing: assume each server on its own line; filter empties
-        lines = [l.strip() for l in out.splitlines()]
-        servers = [l for l in lines if l and not l.lower().startswith("usage") and not l.lower().startswith("note")]
+        servers = []
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if not line:
+                # linha vazia
+                continue
+            low = line.lower()
+            # ignora cabeçalhos que contenham 'location' ou 'hostname' (ou similares)
+            if "location" in low and "hostname" in low:
+                continue
+            # ignora linhas separadoras compostas por traços, por ex: "----" ou "-----------"
+            if all(ch == "-" for ch in line.replace(" ", "")):
+                continue
+            # deve conter o separador '|'
+            if "|" not in line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            # precisa de pelo menos 2 campos (Location | Hostname | ...)
+            if len(parts) < 2:
+                continue
+            hostname = parts[1]
+            if not hostname:
+                continue
+            servers.append(hostname)
         if not servers:
             raise VPNError("No free servers found in output of './hide.me list free'. Output:\n" + out)
-        logging.debug("Parsed servers: %s", servers)
+        logging.debug("Parsed hostnames: %s", servers)
         return servers
-    except Exception as e:
+    except Exception:
         logging.exception("Failed to list free servers")
         raise
 
 def get_access_token(server):
     """
-    Uses pexpect to interact with './hide.me -u {username} token {server}' and send PASSWORD.
+    Correção do parsing e detecção de erro:
+    - Usa pexpect para enviar a password.
+    - Se a saída contiver indicadores de erro explícitos (ex: '[ERR]', 'DNS failed', 'Failed'),
+      levanta AuthError/VPNError imediatamente — não tenta adivinhar token.
+    - Procura por padrões explícitos de token precedidos pela palavra 'token' (ex: "Token: <valor>").
+    - Não usa a heurística permissiva que aceitava qualquer palavra longa (isso causava falsos
+      positivos como 'resolvers.txt'). Se não for possível extrair um token com regras razoáveis,
+      levanta VPNError para forçar inspeção manual do output.
     """
     cmd = f"{HIDE_BINARY} -u {USERNAME} token {server}"
     logging.debug("Requesting access token with command: %s", cmd)
     try:
         child = pexpect.spawn(cmd, encoding='utf-8', timeout=30)
-        # Log pexpect output to stdout so it's visible in workflow logs
         child.logfile = sys.stdout
 
-        # Expect password prompt or EOF
         i = child.expect([r"[Pp]assword", r"Password:", pexpect.EOF, pexpect.TIMEOUT], timeout=20)
         if i == 0 or i == 1:
             logging.debug("Password prompt detected, sending password (via pexpect).")
             child.sendline(PASSWORD)
-            # Read until EOF
             child.expect(pexpect.EOF, timeout=20)
-            full_output = child.before or ""
+            full_output = (child.before or "")
         elif i == 2:
-            full_output = child.before or ""
+            full_output = (child.before or "")
             logging.debug("Command ended without explicit password prompt; captured output.")
         else:
             child.close()
@@ -103,22 +137,35 @@ def get_access_token(server):
         child.close()
 
         logging.debug("Token command output:\n%s", full_output)
-
-        # Look for common failure indicators
         low = full_output.lower()
-        if ("incorrect" in low) or ("authentication" in low and "failed" in low) or ("invalid" in low):
-            raise AuthError("Authentication failed when requesting access token. Check username/password.")
 
-        # Try to extract a token-looking string (very loose)
-        for part in full_output.split():
-            if len(part) > 10 and all(c.isalnum() or c in "-._~+=" for c in part):
-                logging.debug("Heuristic token candidate: %s", part)
-                return part
+        # Se houver indicadores explícitos de erro, levantamos imediatamente para evitar falsos positivos
+        error_indicators = ["[err]", "dns failed", "failed", "authentication failed", "invalid"]
+        for err in error_indicators:
+            if err in low:
+                # Auth-specific phrases => AuthError, genéricas => VPNError
+                if "auth" in low or "password" in low or "authentication failed" in low:
+                    raise AuthError("Authentication failed when requesting access token. Output:\n" + full_output)
+                raise VPNError("Error detected when requesting access token. Output:\n" + full_output)
 
-        # If we didn't find a token, still return full output for debugging
-        logging.warning("Could not heuristically parse a token from output; returning full output for inspection.")
-        return full_output.strip()
-    except pexpect.exceptions.ExceptionPexpect as e:
+        # Tenta extrair token com um padrão explícito precedido por 'token' (ex: "Token: abcd1234...")
+        m = re.search(r"token[:\s]*([A-Za-z0-9\-\._~\+=]{8,})", full_output, re.IGNORECASE)
+        if m:
+            token = m.group(1).strip()
+            logging.debug("Extracted token via 'token' label: %s", token)
+            return token
+
+        # Também aceita linhas do tipo "Your access token is: <token>"
+        m2 = re.search(r"access[\s\-]*token[:\s]*([A-Za-z0-9\-\._~\+=]{8,})", full_output, re.IGNORECASE)
+        if m2:
+            token = m2.group(1).strip()
+            logging.debug("Extracted token via 'access token' label: %s", token)
+            return token
+
+        # Se não conseguimos extrair um token de forma segura, levantamos um erro para inspeção manual.
+        logging.warning("Could not parse a clear access token from output; refusing to guess. Full output logged for inspection.")
+        raise VPNError("Could not parse access token from hide.me output. Full output:\n" + full_output)
+    except pexpect.exceptions.ExceptionPexpect:
         logging.exception("pexpect interaction failed")
         raise
 
