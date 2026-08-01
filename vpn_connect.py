@@ -16,9 +16,6 @@ import re
 
 import requests
 
-# -------------------------
-# CONFIGURAÇÕES WireGuard hardcoded (conforme pedido)
-# -------------------------
 CONFIGS = {
     "JP-FREE-16": """[Interface]
 PrivateKey = SDF5r+E6IwHBaalMuYKFkj4Vr1mQj+PKzp6vI/X8LWk=
@@ -65,9 +62,7 @@ Endpoint = 149.102.254.90:51820
 PersistentKeepalive = 25
 """
 }
-# -------------------------
 
-# Logging setup (DEBUG with timestamp)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -77,37 +72,39 @@ logging.basicConfig(
 
 WG_CONF_PATH = "/etc/wireguard/wg0.conf"
 WG_IFACE = "wg0"
-WAIT_WG_TIMEOUT = 20  # seconds
-MONITOR_INTERVAL = 60  # seconds
+WAIT_WG_TIMEOUT = 20
+MONITOR_INTERVAL = 60
 
 class VPNError(Exception):
     pass
 
 def has_ipv6_in_config(conf_text):
-    """
-    Detecta se o config contém IPv6:
-    - procura '::' na linha Address, ou
-    - verifica se a linha Address contém ',' indicando múltiplos endereços (ex: IPv4,IPv6)
-    """
     m = re.search(r"(?mi)^Address\s*=\s*(.+)$", conf_text)
     if not m:
         return False
     addr_field = m.group(1)
     if "::" in addr_field:
         return True
-    # se há vírgula, pode ser combo IPv4,IPv6
     if "," in addr_field:
-        # verificar se algum dos endereços tem '::'
         parts = [p.strip() for p in addr_field.split(",")]
         for p in parts:
             if "::" in p:
                 return True
     return False
 
+def strip_dns_line(conf_text):
+    """
+    Remove a linha 'DNS = ...' do config. Isto evita que o wg-quick chame o
+    resolvconf, que pode ficar preso indefinidamente em ambientes de runner/container
+    onde systemd-resolved não está configurado da forma esperada.
+    """
+    lines = conf_text.splitlines()
+    filtered = [l for l in lines if not re.match(r"(?i)^\s*DNS\s*=", l)]
+    new_text = "\n".join(filtered) + "\n"
+    logging.debug("Config apos remover linha DNS:\n%s", new_text)
+    return new_text
+
 def write_wg_config_as_root(config_text):
-    """
-    Escreve o config para /etc/wireguard/wg0.conf usando sudo tee.
-    """
     try:
         logging.debug("Escrevendo configuração para %s com sudo tee (necessário privilégio root).", WG_CONF_PATH)
         completed = subprocess.run(
@@ -115,7 +112,8 @@ def write_wg_config_as_root(config_text):
             input=config_text,
             text=True,
             capture_output=True,
-            check=False
+            check=False,
+            timeout=15
         )
         logging.debug("sudo tee returncode=%s", completed.returncode)
         if completed.stdout:
@@ -124,41 +122,46 @@ def write_wg_config_as_root(config_text):
             logging.debug("sudo tee stderr:\n%s", completed.stderr)
         if completed.returncode != 0:
             raise VPNError(f"Falha ao escrever {WG_CONF_PATH} (returncode {completed.returncode})\nStderr: {completed.stderr}")
+    except subprocess.TimeoutExpired:
+        logging.error("Timeout (15s) ao escrever config com sudo tee.")
+        raise VPNError("Timeout ao escrever /etc/wireguard/wg0.conf")
     except Exception:
         logging.exception("Erro ao escrever ficheiro de configuração WireGuard")
         raise
 
 def run_wg_quick_up():
-    """
-    Executa 'sudo wg-quick up wg0' e loga todo o output.
-    """
     try:
         logging.info("Executando 'sudo wg-quick up wg0' ...")
         proc = subprocess.run(
             ["sudo", "wg-quick", "up", WG_IFACE],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=25
         )
         logging.debug("wg-quick up returncode=%s", proc.returncode)
         logging.debug("wg-quick up stdout:\n%s", proc.stdout)
         logging.debug("wg-quick up stderr:\n%s", proc.stderr)
         if proc.returncode != 0:
             raise VPNError(f"'wg-quick up' falhou com code {proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+    except subprocess.TimeoutExpired:
+        logging.error("wg-quick up EXCEDEU o timeout de 25s — provavelmente preso a resolver DNS via resolvconf/systemd-resolved.")
+        # Tenta limpar qualquer estado parcial da interface antes de propagar o erro
+        subprocess.run(["sudo", "wg-quick", "down", WG_IFACE], capture_output=True, text=True, timeout=10, check=False)
+        raise VPNError("wg-quick up travou (timeout de 25s).")
     except Exception:
         logging.exception("Erro ao executar wg-quick up")
         raise
 
 def wg_interface_is_up():
-    """
-    Verifica se a interface wg0 está ativa usando 'wg show wg0'.
-    Retorna True se wg show devolve código 0 e output não vazio.
-    """
     try:
-        proc = subprocess.run(["wg", "show", WG_IFACE], capture_output=True, text=True, check=False)
+        proc = subprocess.run(["wg", "show", WG_IFACE], capture_output=True, text=True, check=False, timeout=5)
         up = (proc.returncode == 0 and (proc.stdout.strip() != "" or proc.stderr.strip() == ""))
         logging.debug("wg show returncode=%s; stdout_len=%d; up=%s", proc.returncode, len(proc.stdout or ""), up)
         return up
+    except subprocess.TimeoutExpired:
+        logging.error("Timeout (5s) ao verificar 'wg show wg0'.")
+        return False
     except Exception:
         logging.exception("Erro ao verificar interface wg0 com 'wg show'")
         return False
@@ -194,7 +197,6 @@ def get_geolocation():
 def main():
     try:
         logging.info("Iniciando vpn_connect (modo WireGuard) — logging DEBUG ativo.")
-        # Escolha do servidor com preferência para configs que tenham IPv6
         keys = list(CONFIGS.keys())
         ipv6_candidates = [k for k, v in CONFIGS.items() if has_ipv6_in_config(v)]
         if ipv6_candidates:
@@ -202,35 +204,35 @@ def main():
             logging.info("Preferência por configs com IPv6 — escolhida entre: %s", ipv6_candidates)
         else:
             chosen = random.choice(keys)
-            logging.warning("Nenhuma config com IPv6 encontrada; escolhida aleatoriamente entre todas as configs (ligação será possivelmente só IPv4).")
-        config_text = CONFIGS[chosen]
-        has_ipv6 = has_ipv6_in_config(config_text)
+            logging.warning("Nenhuma config com IPv6 encontrada; escolhida aleatoriamente entre todas (ligação será só IPv4).")
+
+        config_text_original = CONFIGS[chosen]
+        has_ipv6 = has_ipv6_in_config(config_text_original)
         logging.info("Servidor escolhido: %s (has_ipv6=%s)", chosen, has_ipv6)
 
-        # Escrever config em /etc/wireguard/wg0.conf (necessita sudo)
-        write_wg_config_as_root(config_text)
+        # Remove a linha DNS para evitar hang no resolvconf dentro do runner
+        config_text = strip_dns_line(config_text_original)
 
-        # Levantar wg0
+        write_wg_config_as_root(config_text)
         run_wg_quick_up()
 
-        # Esperar interface wg0 ficar activa (usa wg show)
         logging.info("Aguardando interface %s ficar ativa (timeout %ss)...", WG_IFACE, WAIT_WG_TIMEOUT)
         start = time.time()
+        up = False
         while time.time() - start < WAIT_WG_TIMEOUT:
             if wg_interface_is_up():
                 logging.info("Interface %s está ativa.", WG_IFACE)
+                up = True
                 break
             logging.debug("Interface %s ainda não ativa — aguardando 1s...", WG_IFACE)
             time.sleep(1)
-        else:
+        if not up:
             raise VPNError(f"Interface {WG_IFACE} não ficou ativa após {WAIT_WG_TIMEOUT} segundos.")
 
-        # Buscar IPv4, IPv6 e geolocalização
         ipv4 = get_public_ip("https://api.ipify.org?format=json")
         ipv6 = get_public_ip("https://api64.ipify.org?format=json")
         geo = get_geolocation()
 
-        # Log formatado claro
         logging.info("===== Resumo da Ligação WireGuard =====")
         logging.info("Servidor escolhido: %s", chosen)
         logging.info("Suporta IPv6: %s", "SIM" if has_ipv6 else "NÃO")
@@ -242,8 +244,7 @@ def main():
         logging.info("ISP/Org: %s", geo.get("isp") or "N/A")
         logging.info("=======================================")
 
-        # Loop infinito de monitorização (verifica wg0 e reimprime IPs a cada 60s)
-        logging.info("Entrando em loop infinito de monitorização (intervalo %ds). Cancelar manualmente ou aguardar timeout do workflow.", MONITOR_INTERVAL)
+        logging.info("Entrando em loop infinito de monitorização (intervalo %ds).", MONITOR_INTERVAL)
         while True:
             time.sleep(MONITOR_INTERVAL)
             try:
@@ -251,12 +252,11 @@ def main():
                     logging.error("Interface %s deixou de estar activa!", WG_IFACE)
                 else:
                     logging.debug("Interface %s permanece activa.", WG_IFACE)
-                # Rebuscar IPs para detectar mudanças
                 ipv4 = get_public_ip("https://api.ipify.org?format=json")
                 ipv6 = get_public_ip("https://api64.ipify.org?format=json")
                 logging.info("Heartbeat: servidor=%s | IPv4=%s | IPv6=%s", chosen, ipv4 or "N/A", ipv6 or "N/A")
             except Exception:
-                logging.exception("Erro na iteração do loop de monitorização; aitilizações continuarão.")
+                logging.exception("Erro na iteração do loop de monitorização; continuando.")
     except Exception as e:
         logging.exception("Excepção não tratada no main(): %s", e)
         traceback.print_exc()
