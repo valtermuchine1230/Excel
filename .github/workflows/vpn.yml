@@ -13,13 +13,13 @@ jobs:
         timeout-minutes: 3
         uses: actions/checkout@v4
 
-      - name: Install system packages (wireguard-tools, resolvconf, python3, pip, jq, curl, stdbuf)
+      - name: Install system packages (wireguard-tools, resolvconf, python3, pip, jq, curl)
         timeout-minutes: 5
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           sudo apt-get update -y
-          sudo apt-get install -y wireguard-tools resolvconf python3 python3-pip jq curl coreutils
+          sudo apt-get install -y wireguard-tools resolvconf python3 python3-pip jq curl
           wg --version || true
           resolvconf --version || true
           python3 --version || true
@@ -46,26 +46,19 @@ jobs:
           echo "--- /dev/net/tun ---"
           ls -l /dev/net/tun || echo "AUSENTE"
           echo "--- Modulo wireguard no kernel ---"
-          lsmod | grep wireguard || echo "modulo wireguard nao carregado (pode ser normal, userspace via wg-quick trata disso)"
+          lsmod | grep wireguard || echo "modulo wireguard nao carregado (normal, userspace trata disso)"
           echo "--- Resolvconf ---"
           which resolvconf || echo "resolvconf nao encontrado no PATH"
           echo "--- Espaco em disco ---"
           df -h /
         shell: bash
 
-      - name: Run vpn_connect.py with sudo (unbuffered, watchdog timeout 340m)
+      - name: Run vpn_connect.py with sudo (unbuffered, detailed logs)
         timeout-minutes: 355
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           echo "=== INICIO $(date -u) ==="
-          echo "Running vpn_connect.py with sudo (unbuffered, com watchdog de seguranca de 340 minutos):"
-          # stdbuf -oL -eL forca output linha-a-linha a nivel do SO (mais robusto que so -u do Python)
-          # timeout garante que nunca fica preso silenciosamente sem log novo
-          sudo timeout --signal=SIGTERM --kill-after=30s 340m stdbuf -oL -eL python3 -u vpn_connect.py
-          EXIT_CODE=$?
-          echo "=== FIM $(date -u) — exit code: $EXIT_CODE ==="
-          if [ $EXIT_CODE -eq 124 ]; then
-            echo "AVISO: o script foi terminado pelo watchdog (timeout) apos 340 minutos, nao por erro proprio."
-          fi
+          sudo -E python3 -u vpn_connect.py
+          echo "=== FIM $(date -u) ==="
         shell: bash
