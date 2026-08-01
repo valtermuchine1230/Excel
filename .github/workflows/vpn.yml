@@ -18,67 +18,43 @@ jobs:
           set -x
           sudo apt-get update -y
           sudo apt-get install -y wireguard resolvconf python3 python3-pip jq curl iproute2
-          # show versions for debugging
+          # ensure ping is available
+          sudo apt-get install -y iputils-ping || true
           which wg-quick || true
           wg --version || true
           wg-quick --version || true 2>/dev/null || true
-          resolvconf --version || true
-          python3 --version || true
-          jq --version || true
-          curl --version || true
         shell: bash
 
-      - name: Debug environment (verify /dev/net/tun and sudo non-interactive)
+      - name: Debug environment (concise)
         run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
-          echo "=== ENV DIAGNOSTICS ==="
-          echo "User info:"
-          id -a || true
-          echo "Which binaries:"
-          which wg-quick || true
-          which wg || true
-          which ip || true
-          which sudo || true
-          echo "/dev/net/tun info:"
-          ls -l /dev/net/tun || echo "/dev/net/tun not present"
-          echo "sudo non-interactive check:"
-          sudo -n true && echo "sudo non-interactive OK" || echo "sudo may prompt or not allowed non-interactively"
-          echo "=== END DIAGNOSTICS ==="
+          echo "User info:"; id -a || true
+          echo "/dev/net/tun:"; ls -l /dev/net/tun || echo "/dev/net/tun missing"
+          echo "sudo non-interactive:"; sudo -n true && echo "ok" || echo "may prompt"
+          echo "wg-quick location:"; which wg-quick || true
+          echo "wg version:"; wg --version || true
         shell: bash
 
       - name: Show public IPs (before VPN)
         run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
-          echo "Public IPv4 (runner, pre-VPN):"
+          echo "Public IPv4 (pre-VPN):"
           curl -4 --fail -sS https://api.ipify.org?format=json || echo "IPv4 query failed"
-          echo ""
-          echo "Public IPv6 (runner, pre-VPN):"
+          echo "Public IPv6 (pre-VPN):"
           curl -6 --fail -sS https://api64.ipify.org?format=json || echo "IPv6 query failed or not available"
-          echo ""
         shell: bash
 
       - name: Install Python deps (requests)
         run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           python3 -m pip install --upgrade pip
           python3 -m pip install requests
         shell: bash
 
-      - name: Show /etc/wireguard dir (pre-run)
+      - name: Run vpn_connect.py with sudo (pretty logs)
         run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
-          sudo ls -la /etc/wireguard || echo "/etc/wireguard not present yet"
-        shell: bash
-
-      - name: Run vpn_connect.py with sudo (detailed logs — will print IPs)
-        run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
-          set -x
-          echo "Running vpn_connect.py with sudo - this step will run until you cancel it or until the job hits the 360m timeout"
-          # Run the script in the foreground to stream logs (unbuffered)
+          echo "Starting vpn_connect.py (this will keep running until you cancel or the job times out at 360 minutes)..."
+          # unbuffered Python so logs are streamed
           sudo -E python3 -u vpn_connect.py
         shell: bash
