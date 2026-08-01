@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-AVISO: As credenciais estão hardcoded diretamente neste ficheiro POR PROPÓSITO do pedido.
-Nunca faças isto em repositórios reais ou em produção — usa sempre GitHub Secrets, variáveis de ambiente seguras, ou vaults.
+AVISO: Este ficheiro contém configurações WireGuard hardcoded (inclui chaves privadas) POR
+PROPÓSITO do pedido. Nunca faças isto em repositórios reais ou em produção — usa sempre
+secrets/variáveis de ambiente ou um cofre seguro.
 """
 
 import os
@@ -13,17 +14,60 @@ import logging
 import traceback
 import re
 
-import pexpect
 import requests
 
 # -------------------------
-# CREDENCIAIS (hardcoded)
+# CONFIGURAÇÕES WireGuard hardcoded (conforme pedido)
 # -------------------------
-USERNAME = "Valter3B2"
-PASSWORD = "dshgfajshsksvv+cano@gmail.com"
+CONFIGS = {
+    "JP-FREE-16": """[Interface]
+PrivateKey = SDF5r+E6IwHBaalMuYKFkj4Vr1mQj+PKzp6vI/X8LWk=
+Address = 10.2.0.2/32, 2a07:b944::2:2/128
+DNS = 10.2.0.1, 2a07:b944::2:1
+
+[Peer]
+PublicKey = BbghXRtbSYBJ2Q/eMu4JV7u8LKiKDfgybk7IJAO7iAU=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = 45.87.213.226:51820
+PersistentKeepalive = 25
+""",
+    "MX-FREE-3": """[Interface]
+PrivateKey = aD61ubNv+aVJve4u2r4MSbWJMJsrvUMmQkGRIdBqj1o=
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = rNyiLhJsBGoHd0A6Yrzt6c5DHuD3urE5+ZN3DZITfD8=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = 149.102.224.33:51820
+PersistentKeepalive = 25
+""",
+    "US-FREE-33-A": """[Interface]
+PrivateKey = QEqvyYkrkN17W+ixWBII8etwKY/859raWSxcHGVWvkg=
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = SOXFyakZ9HI9TeiMRyMoy3PXYEzJJ/IDJcMvxZ3uWSE=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = 149.102.254.90:51820
+PersistentKeepalive = 25
+""",
+    "US-FREE-33-B": """[Interface]
+PrivateKey = mClSo+prm7i2Geox/4fk9OSJTPp7J4HAexG4axYf8Fo=
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = SOXFyakZ9HI9TeiMRyMoy3PXYEzJJ/IDJcMvxZ3uWSE=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = 149.102.254.90:51820
+PersistentKeepalive = 25
+"""
+}
 # -------------------------
 
-# Logging setup
+# Logging setup (DEBUG with timestamp)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -31,312 +75,190 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# Constants
-HIDE_BINARY = "./hide.me"
-VPN_IFACE = "vpn"
-INTERFACE_CHECK_TIMEOUT = 30  # seconds
-INTERFACE_POLL_INTERVAL = 2    # seconds
-RETRY_SLEEP = 60               # seconds between periodic checks in the infinite loop
+WG_CONF_PATH = "/etc/wireguard/wg0.conf"
+WG_IFACE = "wg0"
+WAIT_WG_TIMEOUT = 20  # seconds
+MONITOR_INTERVAL = 60  # seconds
 
 class VPNError(Exception):
     pass
 
-class AuthError(VPNError):
-    pass
-
-class TunDeviceError(VPNError):
-    pass
-
-def run_cmd(cmd, timeout=30, check=True):
-    logging.debug("Running command: %s", " ".join(cmd))
-    try:
-        completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-        logging.debug("Return code: %s", completed.returncode)
-        logging.debug("Output:\n%s", completed.stdout)
-        if check and completed.returncode != 0:
-            raise VPNError(f"Command {cmd} failed with code {completed.returncode}\nOutput:\n{completed.stdout}")
-        return completed.stdout
-    except subprocess.TimeoutExpired as e:
-        logging.error("Command timed out: %s", cmd)
-        raise
-
-def list_free_servers():
+def has_ipv6_in_config(conf_text):
     """
-    Correção do parsing:
-    - Divide cada linha pela barra vertical '|' e usa apenas o 2º campo (hostname).
-    - Remove espaços em branco com strip().
-    - Ignora linhas vazias, cabeçalhos (ex: contendo 'Location' ou 'Hostname'),
-      separadores (linhas só com traços) e linhas com menos de 2 campos.
-    - Retorna apenas uma lista de hostnames limpos.
+    Detecta se o config contém IPv6:
+    - procura '::' na linha Address, ou
+    - verifica se a linha Address contém ',' indicando múltiplos endereços (ex: IPv4,IPv6)
     """
-    if not os.path.exists(HIDE_BINARY):
-        raise VPNError(f"{HIDE_BINARY} not found. Ensure binary was built and is in the working directory.")
+    m = re.search(r"(?mi)^Address\s*=\s*(.+)$", conf_text)
+    if not m:
+        return False
+    addr_field = m.group(1)
+    if "::" in addr_field:
+        return True
+    # se há vírgula, pode ser combo IPv4,IPv6
+    if "," in addr_field:
+        # verificar se algum dos endereços tem '::'
+        parts = [p.strip() for p in addr_field.split(",")]
+        for p in parts:
+            if "::" in p:
+                return True
+    return False
+
+def write_wg_config_as_root(config_text):
+    """
+    Escreve o config para /etc/wireguard/wg0.conf usando sudo tee.
+    """
     try:
-        out = run_cmd([HIDE_BINARY, "list", "free"])
-        servers = []
-        for raw_line in out.splitlines():
-            line = raw_line.strip()
-            if not line:
-                # linha vazia
-                continue
-            low = line.lower()
-            # ignora cabeçalhos que contenham 'location' ou 'hostname' (ou similares)
-            if "location" in low and "hostname" in low:
-                continue
-            # ignora linhas separadoras compostas por traços, por ex: "----" ou "-----------"
-            if all(ch == "-" for ch in line.replace(" ", "")):
-                continue
-            # deve conter o separador '|'
-            if "|" not in line:
-                continue
-            parts = [p.strip() for p in line.split("|")]
-            # precisa de pelo menos 2 campos (Location | Hostname | ...)
-            if len(parts) < 2:
-                continue
-            hostname = parts[1]
-            if not hostname:
-                continue
-            servers.append(hostname)
-        if not servers:
-            raise VPNError("No free servers found in output of './hide.me list free'. Output:\n" + out)
-        logging.debug("Parsed hostnames: %s", servers)
-        return servers
+        logging.debug("Escrevendo configuração para %s com sudo tee (necessário privilégio root).", WG_CONF_PATH)
+        completed = subprocess.run(
+            ["sudo", "tee", WG_CONF_PATH],
+            input=config_text,
+            text=True,
+            capture_output=True,
+            check=False
+        )
+        logging.debug("sudo tee returncode=%s", completed.returncode)
+        if completed.stdout:
+            logging.debug("sudo tee stdout:\n%s", completed.stdout)
+        if completed.stderr:
+            logging.debug("sudo tee stderr:\n%s", completed.stderr)
+        if completed.returncode != 0:
+            raise VPNError(f"Falha ao escrever {WG_CONF_PATH} (returncode {completed.returncode})\nStderr: {completed.stderr}")
     except Exception:
-        logging.exception("Failed to list free servers")
+        logging.exception("Erro ao escrever ficheiro de configuração WireGuard")
         raise
 
-def get_access_token(server):
+def run_wg_quick_up():
     """
-    Correção do parsing e detecção de erro:
-    - Usa pexpect para enviar a password.
-    - Se a saída contiver indicadores de erro explícitos (ex: '[ERR]', 'DNS failed', 'Failed'),
-      levanta AuthError/VPNError imediatamente — não tenta adivinhar token.
-    - Procura por padrões explícitos de token precedidos pela palavra 'token' (ex: "Token: <valor>").
-    - Não usa a heurística permissiva que aceitava qualquer palavra longa (isso causava falsos
-      positivos como 'resolvers.txt'). Se não for possível extrair um token com regras razoáveis,
-      levanta VPNError para forçar inspeção manual do output.
+    Executa 'sudo wg-quick up wg0' e loga todo o output.
     """
-    cmd = f"{HIDE_BINARY} -u {USERNAME} token {server}"
-    logging.debug("Requesting access token with command: %s", cmd)
     try:
-        child = pexpect.spawn(cmd, encoding='utf-8', timeout=30)
-        child.logfile = sys.stdout
-
-        i = child.expect([r"[Pp]assword", r"Password:", pexpect.EOF, pexpect.TIMEOUT], timeout=20)
-        if i == 0 or i == 1:
-            logging.debug("Password prompt detected, sending password (via pexpect).")
-            child.sendline(PASSWORD)
-            child.expect(pexpect.EOF, timeout=20)
-            full_output = (child.before or "")
-        elif i == 2:
-            full_output = (child.before or "")
-            logging.debug("Command ended without explicit password prompt; captured output.")
-        else:
-            child.close()
-            raise VPNError("Timeout or unexpected response when requesting token.")
-        child.close()
-
-        logging.debug("Token command output:\n%s", full_output)
-        low = full_output.lower()
-
-        # Se houver indicadores explícitos de erro, levantamos imediatamente para evitar falsos positivos
-        error_indicators = ["[err]", "dns failed", "failed", "authentication failed", "invalid"]
-        for err in error_indicators:
-            if err in low:
-                # Auth-specific phrases => AuthError, genéricas => VPNError
-                if "auth" in low or "password" in low or "authentication failed" in low:
-                    raise AuthError("Authentication failed when requesting access token. Output:\n" + full_output)
-                raise VPNError("Error detected when requesting access token. Output:\n" + full_output)
-
-        # Tenta extrair token com um padrão explícito precedido por 'token' (ex: "Token: abcd1234...")
-        m = re.search(r"token[:\s]*([A-Za-z0-9\-\._~\+=]{8,})", full_output, re.IGNORECASE)
-        if m:
-            token = m.group(1).strip()
-            logging.debug("Extracted token via 'token' label: %s", token)
-            return token
-
-        # Também aceita linhas do tipo "Your access token is: <token>"
-        m2 = re.search(r"access[\s\-]*token[:\s]*([A-Za-z0-9\-\._~\+=]{8,})", full_output, re.IGNORECASE)
-        if m2:
-            token = m2.group(1).strip()
-            logging.debug("Extracted token via 'access token' label: %s", token)
-            return token
-
-        # Se não conseguimos extrair um token de forma segura, levantamos um erro para inspeção manual.
-        logging.warning("Could not parse a clear access token from output; refusing to guess. Full output logged for inspection.")
-        raise VPNError("Could not parse access token from hide.me output. Full output:\n" + full_output)
-    except pexpect.exceptions.ExceptionPexpect:
-        logging.exception("pexpect interaction failed")
-        raise
-
-def start_connection(server):
-    logging.info("Starting VPN connection to server: %s", server)
-    # Use sudo to start connection (user requested sudo)
-    # Start as subprocess and leave it running (so the connection persists)
-    try:
-        proc = subprocess.Popen(["sudo", HIDE_BINARY, "connect", server],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        logging.debug("Started 'hide.me connect' with PID %s", proc.pid)
-        # Stream output lines in background logging
-        def stream_output(p):
-            try:
-                for line in iter(p.stdout.readline, ''):
-                    if not line:
-                        break
-                    logging.debug("[hide.me connect] %s", line.rstrip())
-            except Exception:
-                logging.exception("Error while streaming connect output")
-
-        # Spawn a small thread to stream output so we can continue to check interface
-        import threading
-        t = threading.Thread(target=stream_output, args=(proc,), daemon=True)
-        t.start()
-        return proc
+        logging.info("Executando 'sudo wg-quick up wg0' ...")
+        proc = subprocess.run(
+            ["sudo", "wg-quick", "up", WG_IFACE],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        logging.debug("wg-quick up returncode=%s", proc.returncode)
+        logging.debug("wg-quick up stdout:\n%s", proc.stdout)
+        logging.debug("wg-quick up stderr:\n%s", proc.stderr)
+        if proc.returncode != 0:
+            raise VPNError(f"'wg-quick up' falhou com code {proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
     except Exception:
-        logging.exception("Failed to start hide.me connect")
+        logging.exception("Erro ao executar wg-quick up")
         raise
 
-def interface_is_up():
+def wg_interface_is_up():
+    """
+    Verifica se a interface wg0 está ativa usando 'wg show wg0'.
+    Retorna True se wg show devolve código 0 e output não vazio.
+    """
     try:
-        out = run_cmd(["ip", "addr", "show", VPN_IFACE], check=False)
-        up = ("state UP" in out) or ("UP" in out.splitlines()[0]) if out else False
-        logging.debug("Interface %s check result: %s", VPN_IFACE, up)
+        proc = subprocess.run(["wg", "show", WG_IFACE], capture_output=True, text=True, check=False)
+        up = (proc.returncode == 0 and (proc.stdout.strip() != "" or proc.stderr.strip() == ""))
+        logging.debug("wg show returncode=%s; stdout_len=%d; up=%s", proc.returncode, len(proc.stdout or ""), up)
         return up
     except Exception:
-        logging.exception("Error checking interface with ip addr")
+        logging.exception("Erro ao verificar interface wg0 com 'wg show'")
         return False
-
-def wait_for_interface(timeout=INTERFACE_CHECK_TIMEOUT):
-    logging.info("Waiting for interface '%s' to become active (timeout %ss)...", VPN_IFACE, timeout)
-    start = time.time()
-    attempt = 0
-    while time.time() - start < timeout:
-        attempt += 1
-        logging.debug("Interface check attempt %d", attempt)
-        if interface_is_up():
-            logging.info("Interface '%s' is now active.", VPN_IFACE)
-            return True
-        logging.debug("Interface '%s' not active yet; sleeping %ss", VPN_IFACE, INTERFACE_POLL_INTERVAL)
-        time.sleep(INTERFACE_POLL_INTERVAL)
-    logging.error("Timeout waiting for interface '%s' to become active after %s seconds", VPN_IFACE, timeout)
-    return False
 
 def get_public_ip(url):
     try:
-        logging.debug("Querying %s", url)
+        logging.debug("Acedendo %s", url)
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-        # ipify returns {"ip":"x.x.x.x"}
         if isinstance(data, dict) and "ip" in data:
             return data["ip"]
-        # fallback: entire body
         return r.text.strip()
-    except requests.RequestException:
-        logging.exception("Failed to fetch public IP from %s", url)
-        raise
+    except Exception:
+        logging.exception("Falha ao obter IP de %s", url)
+        return None
 
 def get_geolocation():
     try:
         r = requests.get("https://ipapi.co/json/", timeout=10)
         r.raise_for_status()
-        data = r.json()
+        d = r.json()
         return {
-            "city": data.get("city"),
-            "region": data.get("region"),
-            "country": data.get("country_name") or data.get("country"),
-            "isp": data.get("org") or data.get("isp") or data.get("asn")
+            "city": d.get("city"),
+            "region": d.get("region"),
+            "country": d.get("country_name") or d.get("country"),
+            "isp": d.get("org") or d.get("isp") or d.get("asn")
         }
-    except requests.RequestException:
-        logging.exception("Failed to fetch geolocation from ipapi.co")
-        raise
+    except Exception:
+        logging.exception("Falha ao obter geolocalização")
+        return {}
 
 def main():
     try:
-        logging.info("VPN connect script started (logging DEBUG enabled).")
-        # Pre-check TUN device
-        if not os.path.exists("/dev/net/tun"):
-            raise TunDeviceError("/dev/net/tun not available. TUN device is required.")
+        logging.info("Iniciando vpn_connect (modo WireGuard) — logging DEBUG ativo.")
+        # Escolha do servidor com preferência para configs que tenham IPv6
+        keys = list(CONFIGS.keys())
+        ipv6_candidates = [k for k, v in CONFIGS.items() if has_ipv6_in_config(v)]
+        if ipv6_candidates:
+            chosen = random.choice(ipv6_candidates)
+            logging.info("Preferência por configs com IPv6 — escolhida entre: %s", ipv6_candidates)
+        else:
+            chosen = random.choice(keys)
+            logging.warning("Nenhuma config com IPv6 encontrada; escolhida aleatoriamente entre todas as configs (ligação será possivelmente só IPv4).")
+        config_text = CONFIGS[chosen]
+        has_ipv6 = has_ipv6_in_config(config_text)
+        logging.info("Servidor escolhido: %s (has_ipv6=%s)", chosen, has_ipv6)
 
-        # Obtain list of free servers and pick a random one
-        servers = list_free_servers()
-        server = random.choice(servers)
-        logging.info("Selected server: %s", server)
+        # Escrever config em /etc/wireguard/wg0.conf (necessita sudo)
+        write_wg_config_as_root(config_text)
 
-        # Request access token (pexpect)
-        try:
-            token = get_access_token(server)
-            logging.info("Token obtained (or token output logged).")
-            logging.debug("Token/raw-token-output: %s", token)
-        except AuthError as ae:
-            logging.error("Authentication error obtaining token: %s", ae)
-            raise
+        # Levantar wg0
+        run_wg_quick_up()
 
-        # Start VPN connection
-        proc = start_connection(server)
+        # Esperar interface wg0 ficar activa (usa wg show)
+        logging.info("Aguardando interface %s ficar ativa (timeout %ss)...", WG_IFACE, WAIT_WG_TIMEOUT)
+        start = time.time()
+        while time.time() - start < WAIT_WG_TIMEOUT:
+            if wg_interface_is_up():
+                logging.info("Interface %s está ativa.", WG_IFACE)
+                break
+            logging.debug("Interface %s ainda não ativa — aguardando 1s...", WG_IFACE)
+            time.sleep(1)
+        else:
+            raise VPNError(f"Interface {WG_IFACE} não ficou ativa após {WAIT_WG_TIMEOUT} segundos.")
 
-        # Wait for interface
-        if not wait_for_interface():
-            raise VPNError("VPN interface failed to come up within timeout.")
+        # Buscar IPv4, IPv6 e geolocalização
+        ipv4 = get_public_ip("https://api.ipify.org?format=json")
+        ipv6 = get_public_ip("https://api64.ipify.org?format=json")
+        geo = get_geolocation()
 
-        # Once interface up, fetch IPv4, IPv6, geolocation
-        ipv4 = None
-        ipv6 = None
-        try:
-            ipv4 = get_public_ip("https://api.ipify.org?format=json")
-        except Exception:
-            logging.warning("Failed to get IPv4 address; proceeding.")
+        # Log formatado claro
+        logging.info("===== Resumo da Ligação WireGuard =====")
+        logging.info("Servidor escolhido: %s", chosen)
+        logging.info("Suporta IPv6: %s", "SIM" if has_ipv6 else "NÃO")
+        logging.info("IPv4 público: %s", ipv4 or "N/A")
+        logging.info("IPv6 público: %s", ipv6 or "N/A")
+        logging.info("Cidade: %s", geo.get("city") or "N/A")
+        logging.info("Região: %s", geo.get("region") or "N/A")
+        logging.info("País: %s", geo.get("country") or "N/A")
+        logging.info("ISP/Org: %s", geo.get("isp") or "N/A")
+        logging.info("=======================================")
 
-        try:
-            ipv6 = get_public_ip("https://api64.ipify.org?format=json")
-        except Exception:
-            logging.warning("Failed to get IPv6 address; proceeding.")
-
-        geo = {}
-        try:
-            geo = get_geolocation()
-        except Exception:
-            logging.warning("Failed to get geolocation; proceeding.")
-
-        logging.info("===== VPN Connection Summary =====")
-        logging.info("Server chosen: %s", server)
-        logging.info("IPv4: %s", ipv4 or "N/A")
-        logging.info("IPv6: %s", ipv6 or "N/A")
-        logging.info("City: %s", geo.get("city"))
-        logging.info("Region: %s", geo.get("region"))
-        logging.info("Country: %s", geo.get("country"))
-        logging.info("ISP/Org: %s", geo.get("isp"))
-        logging.info("==================================")
-
-        # Enter infinite monitoring loop: every 60s check interface and re-print IPs
-        logging.info("Entering infinite monitoring loop; will check interface every %d seconds.", RETRY_SLEEP)
+        # Loop infinito de monitorização (verifica wg0 e reimprime IPs a cada 60s)
+        logging.info("Entrando em loop infinito de monitorização (intervalo %ds). Cancelar manualmente ou aguardar timeout do workflow.", MONITOR_INTERVAL)
         while True:
-            time.sleep(RETRY_SLEEP)
+            time.sleep(MONITOR_INTERVAL)
             try:
-                if not interface_is_up():
-                    logging.error("VPN interface '%s' is no longer up!", VPN_IFACE)
+                if not wg_interface_is_up():
+                    logging.error("Interface %s deixou de estar activa!", WG_IFACE)
                 else:
-                    logging.debug("VPN interface '%s' is still up.", VPN_IFACE)
-                # Re-fetch IPs to detect changes
-                try:
-                    ipv4 = get_public_ip("https://api.ipify.org?format=json")
-                except Exception:
-                    ipv4 = None
-                try:
-                    ipv6 = get_public_ip("https://api64.ipify.org?format=json")
-                except Exception:
-                    ipv6 = None
-                logging.info("Heartbeat: server=%s | IPv4=%s | IPv6=%s", server, ipv4 or "N/A", ipv6 or "N/A")
+                    logging.debug("Interface %s permanece activa.", WG_IFACE)
+                # Rebuscar IPs para detectar mudanças
+                ipv4 = get_public_ip("https://api.ipify.org?format=json")
+                ipv6 = get_public_ip("https://api64.ipify.org?format=json")
+                logging.info("Heartbeat: servidor=%s | IPv4=%s | IPv6=%s", chosen, ipv4 or "N/A", ipv6 or "N/A")
             except Exception:
-                logging.exception("Error during monitoring loop iteration; continuing.")
-    except TunDeviceError as te:
-        logging.exception("TUN device error: %s", te)
-        sys.exit(2)
-    except AuthError as ae:
-        logging.exception("Authentication error: %s", ae)
-        sys.exit(3)
-    except Exception:
-        logging.exception("Unhandled exception in main(); exiting.")
+                logging.exception("Erro na iteração do loop de monitorização; aitilizações continuarão.")
+    except Exception as e:
+        logging.exception("Excepção não tratada no main(): %s", e)
         traceback.print_exc()
         sys.exit(1)
 
