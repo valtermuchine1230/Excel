@@ -1,81 +1,43 @@
-name: VPN (hide.me) run
+name: VPN (WireGuard) run
 
 on:
   workflow_dispatch:
 
 jobs:
   run-vpn:
-    name: Run VPN connect and monitor
+    name: Run WireGuard VPN connect and monitor
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-
-      - name: Verify Go version
-        run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
-          set -x
-          go version
-        shell: bash
-
-      - name: Install system packages (wireguard-tools, jq, curl, python3, pip)
+      - name: Install system packages (wireguard-tools, resolvconf, python3, pip, jq, curl)
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           sudo apt-get update -y
-          sudo apt-get install -y wireguard-tools jq curl python3 python3-pip git build-essential ca-certificates
-          go version || true
+          sudo apt-get install -y wireguard-tools resolvconf python3 python3-pip jq curl
+          # show versions
           wg --version || true
+          resolvconf --version || true
+          python3 --version || true
           jq --version || true
           curl --version || true
-          python3 --version || true
         shell: bash
 
-      - name: Clone and build hide.client.linux
-        run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
-          set -x
-          git clone https://github.com/eventure/hide.client.linux hide.client.linux || (cd hide.client.linux && git pull)
-          cd hide.client.linux || exit 1
-          go build -o hide.me
-          # Copia o binário E o CA.pem (necessário para o cliente autenticar via REST)
-          cp -f hide.me "$GITHUB_WORKSPACE/"
-          cp -f CA.pem "$GITHUB_WORKSPACE/"
-          ls -l "$GITHUB_WORKSPACE/hide.me" "$GITHUB_WORKSPACE/CA.pem"
-        shell: bash
-
-      - name: Install Python deps (pexpect, requests)
+      - name: Install Python deps (requests)
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           python3 -m pip install --upgrade pip
-          python3 -m pip install pexpect requests
+          python3 -m pip install requests
         shell: bash
 
-      - name: Demonstrate container capability with --cap-add and /dev/net/tun
+      - name: Run vpn_connect.py with sudo (detailed logs)
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
-          docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun -v $GITHUB_WORKSPACE:/work -w /work ubuntu:22.04 bash -lc '
-            set -x
-            apt-get update -y >/dev/null 2>&1 || true
-            ls -l /dev/net/tun || echo "/dev/net/tun not present inside container"
-            if command -v capsh >/dev/null 2>&1; then capsh --print || true; else echo "capsh not installed in container"; fi
-          '
-        shell: bash
-
-      - name: Confirm /dev/net/tun on runner and run vpn_connect.py with sudo
-        run: |
-          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
-          set -x
-          echo "Checking /dev/net/tun on runner:"
-          ls -l /dev/net/tun || echo "/dev/net/tun not found on runner (expected on hosted runners)"
-          echo "Running vpn_connect.py with sudo (will run until cancelled or until job timeout of 360 minutes):"
+          echo "Running vpn_connect.py with sudo (will run until cancelled or job timeout of 360 minutes):"
           sudo python3 vpn_connect.py
         shell: bash
