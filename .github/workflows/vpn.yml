@@ -10,9 +10,11 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Checkout repository
+        timeout-minutes: 3
         uses: actions/checkout@v4
 
       - name: Install system packages (wireguard-tools, resolvconf, python3, pip, jq, curl)
+        timeout-minutes: 5
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
@@ -26,6 +28,7 @@ jobs:
         shell: bash
 
       - name: Install Python deps (requests)
+        timeout-minutes: 5
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
@@ -34,6 +37,7 @@ jobs:
         shell: bash
 
       - name: Run vpn_connect.py with sudo (detailed logs)
+        timeout-minutes: 355
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
