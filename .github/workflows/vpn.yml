@@ -18,7 +18,6 @@ jobs:
           set -x
           sudo apt-get update -y
           sudo apt-get install -y wireguard-tools resolvconf python3 python3-pip jq curl
-          # show versions
           wg --version || true
           resolvconf --version || true
           python3 --version || true
@@ -39,5 +38,5 @@ jobs:
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
           echo "Running vpn_connect.py with sudo (will run until cancelled or job timeout of 360 minutes):"
-          sudo python3 vpn_connect.py
+          sudo python3 -u vpn_connect.py
         shell: bash
