@@ -30,7 +30,6 @@ jobs:
           set -x
           sudo apt-get update -y
           sudo apt-get install -y wireguard-tools jq curl python3 python3-pip git build-essential ca-certificates
-          # show versions
           go version || true
           wg --version || true
           jq --version || true
@@ -44,11 +43,11 @@ jobs:
           set -x
           git clone https://github.com/eventure/hide.client.linux hide.client.linux || (cd hide.client.linux && git pull)
           cd hide.client.linux || exit 1
-          # Build as requested
           go build -o hide.me
-          # Move binary to workspace root so vpn_connect.py can call it easily
-          mv -f hide.me $GITHUB_WORKSPACE/ || true
-          ls -l $GITHUB_WORKSPACE/hide.me
+          # Copia o binário E o CA.pem (necessário para o cliente autenticar via REST)
+          cp -f hide.me "$GITHUB_WORKSPACE/"
+          cp -f CA.pem "$GITHUB_WORKSPACE/"
+          ls -l "$GITHUB_WORKSPACE/hide.me" "$GITHUB_WORKSPACE/CA.pem"
         shell: bash
 
       - name: Install Python deps (pexpect, requests)
@@ -63,13 +62,10 @@ jobs:
         run: |
           export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
           set -x
-          # This step runs a short container with the requested flags to confirm capability.
-          # It mounts the workspace and checks /dev/net/tun inside the container.
           docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun -v $GITHUB_WORKSPACE:/work -w /work ubuntu:22.04 bash -lc '
             set -x
             apt-get update -y >/dev/null 2>&1 || true
             ls -l /dev/net/tun || echo "/dev/net/tun not present inside container"
-            # Try to show capabilities if capsh is available
             if command -v capsh >/dev/null 2>&1; then capsh --print || true; else echo "capsh not installed in container"; fi
           '
         shell: bash
