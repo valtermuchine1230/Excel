@@ -1,0 +1,78 @@
+name: VPN (hide.me) run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-vpn:
+    name: Run VPN connect and monitor
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+
+      - name: Install system packages (wireguard-tools, jq, curl, python3, pip)
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          sudo apt-get update -y
+          sudo apt-get install -y wireguard-tools jq curl python3 python3-pip git build-essential ca-certificates
+          # show versions
+          go version || true
+          wg --version || true
+          jq --version || true
+          curl --version || true
+          python3 --version || true
+        shell: bash
+
+      - name: Clone and build hide.client.linux
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          git clone https://github.com/eventure/hide.client.linux hide.client.linux || (cd hide.client.linux && git pull)
+          cd hide.client.linux || exit 1
+          # Build as requested
+          go build -o hide.me
+          # Move binary to workspace root so vpn_connect.py can call it easily
+          mv -f hide.me $GITHUB_WORKSPACE/ || true
+          ls -l $GITHUB_WORKSPACE/hide.me
+        shell: bash
+
+      - name: Install Python deps (pexpect, requests)
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pexpect requests
+        shell: bash
+
+      - name: Demonstrate container capability with --cap-add and /dev/net/tun
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          # This step runs a short container with the requested flags to confirm capability.
+          # It mounts the workspace and checks /dev/net/tun inside the container.
+          docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun -v $GITHUB_WORKSPACE:/work -w /work ubuntu:22.04 bash -lc '
+            set -x
+            apt-get update -y >/dev/null 2>&1 || true
+            ls -l /dev/net/tun || echo "/dev/net/tun not present inside container"
+            # Try to show capabilities if capsh is available
+            if command -v capsh >/dev/null 2>&1; then capsh --print || true; else echo "capsh not installed in container"; fi
+          '
+        shell: bash
+
+      - name: Confirm /dev/net/tun on runner and run vpn_connect.py with sudo
+        run: |
+          export PS4='+ $(date -u "+%Y-%m-%dT%H:%M:%S%z") '
+          set -x
+          echo "Checking /dev/net/tun on runner:"
+          ls -l /dev/net/tun || echo "/dev/net/tun not found on runner (expected on hosted runners)"
+          echo "Running vpn_connect.py with sudo (will run until cancelled or until job timeout of 360 minutes):"
+          sudo python3 vpn_connect.py
+        shell: bash
